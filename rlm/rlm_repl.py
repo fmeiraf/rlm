@@ -70,9 +70,7 @@ class RLM_REPL(RLM):
         self.logger.log_query_start(query)
 
         # Initialize the conversation with the REPL prompt
-        self.messages = (
-            self.custom_prompt if self.custom_prompt else build_system_prompt()
-        )
+        self.messages = build_system_prompt(self.custom_prompt)
         self.logger.log_initial_messages(self.messages)
 
         # Initialize REPL environment with context data

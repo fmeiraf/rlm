@@ -2,7 +2,7 @@
 Example prompt templates for the RLM REPL Client.
 """
 
-from typing import Dict
+from typing import Dict, Optional
 
 DEFAULT_QUERY = "Please read through the context and answer any queries or respond to any instructions contained within it."
 
@@ -48,22 +48,36 @@ IMPORTANT: When you are done with the iterative process, you MUST provide a fina
 Think step by step carefully, plan, and execute this plan immediately in your response -- do not just say "I will do this" or "I will do that". Output to the REPL environment and recursive LLMs as much as possible. Remember to explicitly answer the original query in your final answer.
 """
 
-def build_system_prompt() -> list[Dict[str, str]]:
-    return [
-        {
-            "role": "system",
-            "content": REPL_SYSTEM_PROMPT
-        },
-    ]
+
+def build_system_prompt(custom_prompt: Optional[str] = None) -> list[Dict[str, str]]:
+    if custom_prompt:
+        return [
+            {"role": "system", "content": custom_prompt},
+        ]
+    else:
+        return [
+            {"role": "system", "content": REPL_SYSTEM_PROMPT},
+        ]
 
 
 # Prompt at every step to query root LM to make a decision
-USER_PROMPT = """Think step-by-step on what to do using the REPL environment (which contains the context) to answer the original query: \"{query}\".\n\nContinue using the REPL environment, which has the `context` variable, and querying sub-LLMs by writing to ```repl``` tags, and determine your answer. Your next action:""" 
-def next_action_prompt(query: str, iteration: int = 0, final_answer: bool = False) -> Dict[str, str]:
+USER_PROMPT = """Think step-by-step on what to do using the REPL environment (which contains the context) to answer the original query: \"{query}\".\n\nContinue using the REPL environment, which has the `context` variable, and querying sub-LLMs by writing to ```repl``` tags, and determine your answer. Your next action:"""
+
+
+def next_action_prompt(
+    query: str, iteration: int = 0, final_answer: bool = False
+) -> Dict[str, str]:
     if final_answer:
-        return {"role": "user", "content": "Based on all the information you have, provide a final answer to the user's query."}
+        return {
+            "role": "user",
+            "content": "Based on all the information you have, provide a final answer to the user's query.",
+        }
     if iteration == 0:
         safeguard = "You have not interacted with the REPL environment or seen your context yet. Your next action should be to look through, don't just provide a final answer yet.\n\n"
         return {"role": "user", "content": safeguard + USER_PROMPT.format(query=query)}
     else:
-        return {"role": "user", "content": "The history before is your previous interactions with the REPL environment. " + USER_PROMPT.format(query=query)}
+        return {
+            "role": "user",
+            "content": "The history before is your previous interactions with the REPL environment. "
+            + USER_PROMPT.format(query=query),
+        }

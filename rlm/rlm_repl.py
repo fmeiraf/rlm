@@ -149,6 +149,68 @@ class RLM_REPL(RLM):
 
         return final_answer
 
+    @observe(name="rlm.completion")
+    async def acompletion(
+        self,
+        context: List[str] | str | List[Dict[str, str]],
+        query: Optional[str] = None,
+    ) -> str:
+        """
+        Given a query and a (potentially long) context, recursively call the LM
+        to explore the context and provide an answer using a REPL environment.
+        """
+        self.messages = self.setup_context(context, query)
+
+        # Main loop runs for fixed # of root LM iterations
+        for iteration in range(self._max_iterations):
+            # Query root LM to interact with REPL environment
+            response = await self.llm.acompletion(
+                self.messages + [next_action_prompt(query, iteration)]
+            )
+
+            # Check for code blocks
+            code_blocks = utils.find_code_blocks(response)
+            self.logger.log_model_response(
+                response, has_tool_calls=code_blocks is not None
+            )
+
+            # Process code execution or add assistant message
+            if code_blocks is not None:
+                self.messages = utils.process_code_execution(
+                    response,
+                    self.messages,
+                    self.repl_env,
+                    self.repl_env_logger,
+                    self.logger,
+                )
+            else:
+                # Add assistant message when there are no code blocks
+                assistant_message = {
+                    "role": "assistant",
+                    "content": "You responded with:\n" + response,
+                }
+                self.messages.append(assistant_message)
+
+            # Check that model produced a final answer
+            final_answer = utils.check_for_final_answer(
+                response,
+                self.repl_env,
+                self.logger,
+            )
+
+            # In practice, you may need some guardrails here.
+            if final_answer:
+                self.logger.log_final_response(final_answer)
+                return final_answer
+
+        # If we reach here, no final answer was found in any iteration
+        print("No final answer found in any iteration")
+        self.messages.append(next_action_prompt(query, iteration, final_answer=True))
+        final_answer = await self.llm.acompletion(self.messages)
+        self.logger.log_final_response(final_answer)
+
+        return final_answer
+
     def cost_summary(self) -> Dict[str, Any]:
         """Get the cost summary of the Root LM + Sub-RLM Calls."""
         raise NotImplementedError("Cost tracking not implemented for RLM REPL.")

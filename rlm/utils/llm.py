@@ -65,6 +65,11 @@ class LiteLLMClient:
         **kwargs,
     ) -> str:
         try:
+            if isinstance(messages, str):
+                messages = [{"role": "user", "content": messages}]
+            elif isinstance(messages, dict):
+                messages = [messages]
+
             response = self.client(
                 model=self.model,
                 messages=messages,
@@ -85,6 +90,11 @@ class LiteLLMClient:
         **kwargs,
     ) -> str:
         try:
+            if isinstance(messages, str):
+                messages = [{"role": "user", "content": messages}]
+            elif isinstance(messages, dict):
+                messages = [messages]
+
             response = await self.aclient(
                 model=self.model,
                 messages=messages,

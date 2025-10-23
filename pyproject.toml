@@ -8,6 +8,7 @@ dependencies = [
     "dotenv>=0.9.9",
     "langfuse>=3.7.0",
     "litellm>=1.78.4",
+    "nest-asyncio>=1.6.0",
     "openai>=2.5.0",
     "rich>=14.2.0",
 ]

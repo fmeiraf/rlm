@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import io
 import json
 import os
@@ -9,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
+import nest_asyncio
 from langfuse import observe
 
 from rlm import RLM
@@ -72,6 +75,16 @@ class REPLResult:
 
 
 class REPLEnv:
+    @staticmethod
+    def _is_async_code(code: str) -> bool:
+        """Check if code contains async/await keywords."""
+        return (
+            "await " in code
+            or "async def" in code
+            or "async for" in code
+            or "async with" in code
+        )
+
     def __init__(
         self,
         recursive_model: str = "gpt-5-mini",
@@ -85,6 +98,16 @@ class REPLEnv:
 
         # Create temporary directory (but don't change global working directory)
         self.temp_dir = tempfile.mkdtemp(prefix="repl_env_")
+
+        # Initialize async support with nest_asyncio to allow nested event loops
+        nest_asyncio.apply()
+
+        # Create or get event loop for async execution
+        try:
+            self.loop = asyncio.get_event_loop()
+        except RuntimeError:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
 
         # Initialize minimal RLM / LM client. Change this to support more depths.
         self.sub_rlm: RLM = Sub_RLM(model=recursive_model)
@@ -338,7 +361,18 @@ class REPLEnv:
                     # Execute imports first in globals to make them available
                     if import_lines:
                         import_code = "\n".join(import_lines)
-                        exec(import_code, self.globals, self.globals)
+                        if self._is_async_code(import_code):
+                            # Handle async imports
+                            async def _exec_imports():
+                                exec(import_code, self.globals, self.globals)
+                                # Await any coroutines created during import
+                                for key, value in list(self.globals.items()):
+                                    if inspect.iscoroutine(value):
+                                        self.globals[key] = await value
+
+                            self.loop.run_until_complete(_exec_imports())
+                        else:
+                            exec(import_code, self.globals, self.globals)
 
                     # Execute the rest of the code. We also want to print last expressions
                     if other_lines:
@@ -346,90 +380,208 @@ class REPLEnv:
                         # Create a combined namespace that includes both globals and locals
                         combined_namespace = {**self.globals, **self.locals}
 
-                        # Check if the last non-comment line is an expression
-                        non_comment_lines = [
-                            line
-                            for line in other_lines
-                            if line and not line.startswith("#")
-                        ]
+                        # Check if code contains async/await
+                        is_async = self._is_async_code(other_code)
 
-                        if non_comment_lines:
-                            last_line = non_comment_lines[-1]
+                        if is_async:
+                            # Handle async code execution
+                            # Wrap the code in an async function to support top-level await
+                            async def _exec_async_code():
+                                # Check if the last non-comment line is an expression
+                                non_comment_lines = [
+                                    line
+                                    for line in other_lines
+                                    if line and not line.startswith("#")
+                                ]
 
-                            # Check if the last line looks like an expression (not a statement)
-                            is_expression = (
-                                not last_line.startswith(
-                                    (
-                                        "import ",
-                                        "from ",
-                                        "def ",
-                                        "class ",
-                                        "if ",
-                                        "for ",
-                                        "while ",
-                                        "try:",
-                                        "with ",
-                                        "return ",
-                                        "yield ",
-                                        "break",
-                                        "continue",
-                                        "pass",
+                                # Determine if we should print the last expression
+                                should_print_last_expr = False
+                                last_line = None
+
+                                if non_comment_lines:
+                                    last_line = non_comment_lines[-1].strip()
+
+                                    # Check if the last line looks like an expression (not a statement)
+                                    is_expression = (
+                                        not last_line.startswith(
+                                            (
+                                                "import ",
+                                                "from ",
+                                                "def ",
+                                                "class ",
+                                                "if ",
+                                                "for ",
+                                                "while ",
+                                                "try:",
+                                                "with ",
+                                                "return ",
+                                                "yield ",
+                                                "break",
+                                                "continue",
+                                                "pass",
+                                                "print(",
+                                            )
+                                        )
+                                        and "="
+                                        not in last_line.split("#")[
+                                            0
+                                        ]  # Not an assignment
+                                        and not last_line.endswith(
+                                            ":"
+                                        )  # Not a control structure
                                     )
+
+                                    should_print_last_expr = is_expression
+
+                                # Find the index of the last non-comment line in other_lines
+                                last_expr_index = -1
+                                if should_print_last_expr and last_line:
+                                    for i in range(len(other_lines) - 1, -1, -1):
+                                        if other_lines[i].strip() == last_line:
+                                            last_expr_index = i
+                                            break
+
+                                # Indent the code for wrapping in async function
+                                indented_lines = []
+                                for i, line in enumerate(other_lines):
+                                    # Check if this is the last expression line
+                                    if should_print_last_expr and i == last_expr_index:
+                                        # For the last expression, capture and print it
+                                        indented_lines.append(
+                                            f"    __last_expr__ = {line.strip()}"
+                                        )
+                                        indented_lines.append(
+                                            "    if __last_expr__ is not None:"
+                                        )
+                                        indented_lines.append(
+                                            "        print(repr(__last_expr__))"
+                                        )
+                                    else:
+                                        indented_lines.append("    " + line)
+
+                                indented_code = "\n".join(indented_lines)
+
+                                # Add code to use a dict to capture variables
+                                # We'll use __builtins__.locals() to bypass the blocked locals
+                                indented_code += "\n    import builtins"
+                                indented_code += "\n    return builtins.locals()"
+
+                                # Create wrapper function that returns its local namespace
+                                wrapper = (
+                                    f"async def __async_wrapper__():\n{indented_code}\n"
                                 )
-                                and "="
-                                not in last_line.split("#")[0]  # Not an assignment
-                                and not last_line.endswith(
-                                    ":"
-                                )  # Not a control structure
-                                and not last_line.startswith(
-                                    "print("
-                                )  # Not an explicit print
-                            )
 
-                            if is_expression:
-                                try:
-                                    # Execute all lines except the last one as statements
-                                    if len(non_comment_lines) > 1:
-                                        # Find where the last line starts in the original code
-                                        last_line_start = -1
-                                        for i, line in enumerate(other_lines):
-                                            if line == last_line:
-                                                last_line_start = i
-                                                break
+                                # Execute the wrapper definition
+                                exec(wrapper, combined_namespace, combined_namespace)
 
-                                        if last_line_start > 0:
-                                            statements_code = "\n".join(
-                                                other_lines[:last_line_start]
-                                            )
-                                            exec(
-                                                statements_code,
-                                                combined_namespace,
-                                                combined_namespace,
-                                            )
+                                # Call the wrapper and get the local variables
+                                local_vars = await combined_namespace[
+                                    "__async_wrapper__"
+                                ]()
 
-                                    # Evaluate the last line as an expression and print the result
-                                    result = eval(
-                                        last_line,
-                                        combined_namespace,
-                                        combined_namespace,
+                                # Merge local variables back into combined namespace
+                                if local_vars:
+                                    for key, value in local_vars.items():
+                                        if not key.startswith("_") and key not in (
+                                            "builtins",
+                                            "__last_expr__",
+                                        ):
+                                            combined_namespace[key] = value
+
+                                # Clean up the wrapper
+                                combined_namespace.pop("__async_wrapper__", None)
+
+                            self.loop.run_until_complete(_exec_async_code())
+                        else:
+                            # Synchronous code execution (original logic)
+                            # Check if the last non-comment line is an expression
+                            non_comment_lines = [
+                                line
+                                for line in other_lines
+                                if line and not line.startswith("#")
+                            ]
+
+                            if non_comment_lines:
+                                last_line = non_comment_lines[-1]
+
+                                # Check if the last line looks like an expression (not a statement)
+                                is_expression = (
+                                    not last_line.startswith(
+                                        (
+                                            "import ",
+                                            "from ",
+                                            "def ",
+                                            "class ",
+                                            "if ",
+                                            "for ",
+                                            "while ",
+                                            "try:",
+                                            "with ",
+                                            "return ",
+                                            "yield ",
+                                            "break",
+                                            "continue",
+                                            "pass",
+                                        )
                                     )
-                                    if result is not None:
-                                        print(repr(result))
+                                    and "="
+                                    not in last_line.split("#")[0]  # Not an assignment
+                                    and not last_line.endswith(
+                                        ":"
+                                    )  # Not a control structure
+                                    and not last_line.startswith(
+                                        "print("
+                                    )  # Not an explicit print
+                                )
 
-                                except Exception as e:
-                                    print(f"Error evaluating expression: {e}")
-                                    # If evaluation fails, fall back to normal execution
+                                if is_expression:
+                                    try:
+                                        # Execute all lines except the last one as statements
+                                        if len(non_comment_lines) > 1:
+                                            # Find where the last line starts in the original code
+                                            last_line_start = -1
+                                            for i, line in enumerate(other_lines):
+                                                if line == last_line:
+                                                    last_line_start = i
+                                                    break
+
+                                            if last_line_start > 0:
+                                                statements_code = "\n".join(
+                                                    other_lines[:last_line_start]
+                                                )
+                                                exec(
+                                                    statements_code,
+                                                    combined_namespace,
+                                                    combined_namespace,
+                                                )
+
+                                        # Evaluate the last line as an expression and print the result
+                                        result = eval(
+                                            last_line,
+                                            combined_namespace,
+                                            combined_namespace,
+                                        )
+                                        if result is not None:
+                                            print(repr(result))
+
+                                    except Exception as e:
+                                        print(f"Error evaluating expression: {e}")
+                                        # If evaluation fails, fall back to normal execution
+                                        exec(
+                                            other_code,
+                                            combined_namespace,
+                                            combined_namespace,
+                                        )
+                                else:
+                                    # Execute normally as statements
                                     exec(
                                         other_code,
                                         combined_namespace,
                                         combined_namespace,
                                     )
                             else:
-                                # Execute normally as statements
+                                # Only comments, execute normally (though it won't do anything)
                                 exec(other_code, combined_namespace, combined_namespace)
-                        else:
-                            # Only comments, execute normally (though it won't do anything)
-                            exec(other_code, combined_namespace, combined_namespace)
 
                         # Update locals with any new variables created
                         for key, value in combined_namespace.items():
